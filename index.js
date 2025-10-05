@@ -1,54 +1,49 @@
-// OTP API — Express + Firebase Admin + Nodemailer
-require("dotenv").config(); // lokal .env için
+// OTP API — Express + Firebase Admin + SendGrid (HTTP API)
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const nodemailer = require("nodemailer");
+const sgMail = require("@sendgrid/mail");
 const crypto = require("crypto");
 
-// --- ENV --- (Render/Railway’de bunları panelden girersin)
 const {
   GOOGLE_APPLICATION_CREDENTIALS_JSON,
-  SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS,
+  SENDGRID_API_KEY,
+  FROM_EMAIL,
   APP_NAME = "TechConnect",
-  OTP_PEPPER = "change-this-long-random-secret"
+  OTP_PEPPER = "change-this-long-random-secret",
+  CORS_ORIGIN,
+  PORT = 8080,
 } = process.env;
 
-if (!GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-  throw new Error("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON");
-}
+if (!GOOGLE_APPLICATION_CREDENTIALS_JSON) throw new Error("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON");
+if (!SENDGRID_API_KEY) throw new Error("Missing SENDGRID_API_KEY");
+if (!FROM_EMAIL) throw new Error("Missing FROM_EMAIL");
 
-// Firebase Admin init
+// Firebase Admin
 admin.initializeApp({
-  credential: admin.credential.cert(JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON))
+  credential: admin.credential.cert(JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON)),
 });
 const db = admin.firestore();
 
-// SMTP
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: Number(SMTP_PORT || 465),
-  secure: String(SMTP_SECURE || "true") === "true", // 465:true, 587:false
-  auth: { user: SMTP_USER, pass: SMTP_PASS }
-});
+// SendGrid init
+sgMail.setApiKey(SENDGRID_API_KEY);
+async function sendEmail({ to, subject, text, html }) {
+  await sgMail.send({ to, from: FROM_EMAIL, subject, text, html });
+}
 
 // Helpers
-function sixDigit() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-function hash(code, uid) {
-  return crypto.createHash("sha256").update(`${code}|${uid}|${OTP_PEPPER}`).digest("hex");
-}
-function toMillis(ts) {
-  return ts && typeof ts.toMillis === "function" ? ts.toMillis() : 0;
-}
+const sixDigit = () => Math.floor(100000 + Math.random() * 900000).toString();
+const hash = (code, uid) => crypto.createHash("sha256").update(`${code}|${uid}|${OTP_PEPPER}`).digest("hex");
+const toMillis = (ts) => (ts && typeof ts.toMillis === "function" ? ts.toMillis() : 0);
 
 // App
 const app = express();
-app.use(cors());            // istersen origin kısıtlayabilirsin
+app.use(CORS_ORIGIN ? cors({ origin: CORS_ORIGIN }) : cors());
 app.use(express.json());
 
-// Auth middleware: Firebase ID token doğrula
+// Firebase ID token doğrulayan middleware
 async function auth(req, res, next) {
   try {
     const hdr = req.headers.authorization || "";
@@ -57,12 +52,12 @@ async function auth(req, res, next) {
     const decoded = await admin.auth().verifyIdToken(token);
     req.uid = decoded.uid;
     next();
-  } catch (e) {
+  } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
 
-// OTP iste (mail gönder)
+// OTP iste — e-posta gönder
 app.post("/otp/request", auth, async (req, res) => {
   try {
     const uid = req.uid;
@@ -75,36 +70,29 @@ app.post("/otp/request", auth, async (req, res) => {
     const snap = await ref.get();
     if (snap.exists) {
       const last = toMillis(snap.data().lastSentAt);
-      if (Date.now() - last < 45000) {
-        return res.status(429).json({ error: "Please wait before requesting again" });
-      }
+      if (Date.now() - last < 45_000) return res.status(429).json({ error: "Please wait before requesting again" });
     }
 
     const code = sixDigit();
     const codeHash = hash(code, uid);
     const now = admin.firestore.Timestamp.now();
-    const expiresAt = admin.firestore.Timestamp.fromMillis(Date.now() + 10 * 60 * 1000); // 10 dk
+    const expiresAt = admin.firestore.Timestamp.fromMillis(Date.now() + 10 * 60 * 1000);
 
-    await ref.set({
-      codeHash,
-      expiresAt,
-      attempts: 0,
-      lastSentAt: now,
-      createdAt: now,
-      emailSnapshot: email
-    }, { merge: true });
+    await ref.set(
+      { codeHash, expiresAt, attempts: 0, lastSentAt: now, createdAt: now, emailSnapshot: email },
+      { merge: true }
+    );
 
-    await transporter.sendMail({
-      from: SMTP_USER,
+    await sendEmail({
       to: email,
       subject: `${APP_NAME} - Doğrulama Kodun`,
       text: `Doğrulama kodun: ${code}\nBu kod 10 dakika geçerlidir.`,
-      html: `<p>Doğrulama kodun: <b style="font-size:18px">${code}</b></p><p>Kod 10 dakika geçerlidir.</p>`
+      html: `<p>Doğrulama kodun: <b style="font-size:18px">${code}</b></p><p>Kod 10 dakika geçerlidir.</p>`,
     });
 
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error("OTP request error:", e);
     res.status(500).json({ error: "send_failed" });
   }
 });
@@ -134,7 +122,7 @@ app.post("/otp/verify", auth, async (req, res) => {
     await ref.delete();
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error("OTP verify error:", e);
     res.status(500).json({ ok: false, reason: "verify_failed" });
   }
 });
@@ -142,5 +130,4 @@ app.post("/otp/verify", auth, async (req, res) => {
 // Health
 app.get("/", (_req, res) => res.send("OK"));
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`OTP API listening on :${PORT}`));
+app.listen(Number(PORT), () => console.log(`OTP API listening on :${PORT}`));

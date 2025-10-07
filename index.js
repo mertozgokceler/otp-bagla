@@ -85,9 +85,23 @@ app.post("/otp/request", auth, async (req, res) => {
 
     await sendEmail({
       to: email,
-      subject: `${APP_NAME} - Doğrulama Kodun`,
-      text: `Doğrulama kodun: ${code}\nBu kod 10 dakika geçerlidir.`,
-      html: `<p>Doğrulama kodun: <b style="font-size:18px">${code}</b></p><p>Kod 10 dakika geçerlidir.</p>`,
+      subject: `${APP_NAME} — E-posta Doğrulama Kodun`,
+      text:
+        `Merhaba, TechConnect'e hoş geldin!\n` +
+        `Aşağıda doğrulama kodunu bulabilirsin.\n\n` +
+        `Doğrulama kodun:\n${code}\n\n` +
+        `Bu kod 10 dakika geçerlidir.`,
+      html: `
+    <div style="font-family:Arial,sans-serif;line-height:1.6">
+      <h2 style="margin:0 0 12px">Merhaba, TechConnect'e hoş geldin! 🎉</h2>
+      <p>Aşağıda doğrulama kodunu bulabilirsin.</p>
+
+      <p style="margin:16px 0 8px;font-weight:600">Doğrulama kodun:</p>
+      <p style="font-size:24px;letter-spacing:3px;font-weight:bold">${code}</p>
+
+      <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
+      <p style="color:#555">Bu kod <strong>10 dakika</strong> geçerlidir.</p>
+    </div>`
     });
 
     res.json({ ok: true });
